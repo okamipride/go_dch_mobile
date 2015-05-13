@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 )
 
 const (
@@ -19,76 +20,84 @@ type Device struct {
 
 var (
 	urlip       = "52.68.172.23:80"
-	did         = "72dfc969ff9530f735f19691c655d07f"
+	did         = "12345678901234567890123456789012"
 	get_request = "GET /ws/api/getVersion?did=" + did + " HTTP/1.1\r\n"
-	host        = "Host: 0301.dch.dlink.com\r\n"
+	host        = "Host: 0401.dch.dlink.com\r\n"
 	alive       = "Connection: keep-alive\r\n\r\n"
 	get_msg     = get_request + host + alive
 )
 
-func main() {
-	//establish connection
-	fmt.Println("Agent Start to connect ... ")
-	tcpaddr, err := net.ResolveTCPAddr("tcp",
-		urlip)
-	checkError(err)
-	conn, err := net.DialTCP("tcp", nil, tcpaddr)
-	checkError(err)
-	fmt.Println("Agent TCP Connect ... ")
+func SendRoutine() {
 
-	go SendData(conn, get_msg)
-	c := make(chan bool)
-	go RecieveData(conn, c)
-	<-c
-	fmt.Println("Program is going to exit")
-	//time.Sleep(5000)
-	//os.Exit(0)
-}
+	tcpaddr, err := net.ResolveTCPAddr("tcp", urlip)
+	if checkError(err, "App ResolveTCPAddr") {
+		os.Exit(0)
+	}
 
-/*
-	Sending data to Relay server
-*/
+	for i := 0; i < 3; i++ {
+		conn, err := net.DialTCP("tcp", nil, tcpaddr)
+		//defer conn.Close() // close when leave the loop
+		if checkError(err, "App DialTCP") {
+			continue
+		}
 
-func SendData(conn *net.TCPConn, msg string) {
-	_, err := conn.Write([]byte(msg))
-	fmt.Println("sendData write")
-	checkError(err)
-	fmt.Println("data send: %s", msg)
-}
+		fmt.Println("App TCP Connect ... ")
 
-/*
-	Recieve data from Relay server
-*/
+		SendMessage(conn, get_msg)
 
-func RecieveData(conn *net.TCPConn, cs chan bool) {
-	for {
-		buf_recever := make([]byte, RECV_BUF_LEN)
-		_, err := conn.Read(buf_recever)
+		fmt.Println("Agent Write = %s", get_request)
 
-		if err != nil {
-			fmt.Println("Error while receive response:", err.Error())
-			cs <- false
+		echo := GetMessage(conn)
+		if echo == "" {
+			fmt.Println("echo empty")
 			break
 		}
 
-		fmt.Println("recieve data:%s", string(buf_recever))
+		time.Sleep(time.Second * 2)
+
 	}
-	cs <- true
+
+	fmt.Println("SendRoutine Exist")
 }
 
-/**
-	Methods
-**/
+func main() {
+	go SendRoutine()
 
-/**
-	Utilities
-**/
+	for {
+		time.Sleep(time.Second)
+	}
+}
 
-func checkError(err error) {
+func checkError(err error, act string) bool {
 
 	if err != nil {
-		fmt.Println("Error Occur!")
+		fmt.Println(act + " Error Occur!")
 		fmt.Fprintf(os.Stderr, "Fatal error: %s", err.Error())
-		os.Exit(1)
+		return true
 	}
+	//fmt.Println(act + " no Error")
+	return false
+}
+
+func SendMessage(conn *net.TCPConn, msg string) {
+	_, err := conn.Write([]byte(msg))
+	if err != nil {
+		println("Error send request:", err.Error())
+	} else {
+		println("Request sent")
+	}
+}
+
+func GetMessage(conn *net.TCPConn) string {
+	buf_recever := make([]byte, RECV_BUF_LEN)
+	n, err := conn.Read(buf_recever)
+	if err != nil {
+		println("Error while receive response:", err.Error())
+		return ""
+	}
+
+	echodata := make([]byte, n)
+	copy(echodata, buf_recever)
+
+	return string(echodata)
 }
