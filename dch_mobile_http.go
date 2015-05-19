@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -13,8 +17,9 @@ const (
 	CONFIG_LINE_SIZE = 1024
 )
 
+var did_prefix = "1234567890" + "1234567890"
+
 type Device struct {
-	procid   int
 	usr_did  string
 	usr_hash string
 }
@@ -22,11 +27,11 @@ type Device struct {
 var (
 	//urlip       = "52.68.172.23:80"
 	url     = "r0401.dch.dlink.com"
-	did     = "12345678901234567890123456789001"
+	did     = "12345678901234567890000000000001"
 	domain  = "http://r0401.dch.dlink.com"
-	api_url = "/ws/api/getVersion?did=" + did
+	api_url = "/ws/api/getVersion?did="
 	alive   = "Connection: keep-alive"
-	request = domain + api_url + did
+	//request = domain + api_url + did
 )
 
 func closeHttp(resp *http.Response) {
@@ -34,8 +39,8 @@ func closeHttp(resp *http.Response) {
 	defer resp.Body.Close()
 }
 
-func SendRoutine() {
-	resp, err := http.Get(request)
+func (dev *Device) SendRoutine() {
+	resp, err := http.Get(domain + api_url + dev.usr_did)
 
 	if err != nil {
 		log.Println(err)
@@ -50,16 +55,24 @@ func SendRoutine() {
 	}
 
 	log.Println("recieve buffer", string(readbytes))
-
 }
 
 func main() {
-	go SendRoutine()
+	num_dev := readNumDevice()
+	for i := int64(1); i <= num_dev; i++ {
+		device := Device{usr_did: genDid(i), usr_hash: genDid(i)}
+		go device.SendRoutine()
+	}
 
 	for {
 		time.Sleep(time.Second)
 	}
+
 	log.Println("Exit Program")
+}
+
+func genDid(num int64) string {
+	return did_prefix + fmt.Sprintf("%012x", num)
 }
 
 func closeConn(c *http.Response) {
@@ -75,4 +88,43 @@ func checkError(err error, act string) bool {
 		return true
 	}
 	return false
+}
+
+func readNumDevice() int64 {
+	var num_did int64 = 0
+
+	for {
+		consolereader := bufio.NewReader(os.Stdin)
+		fmt.Print("Enter Number of Devices: ")
+		input, err := consolereader.ReadString('\n') // this will prompt the user for input
+
+		if err != nil {
+			fmt.Println(err)
+			fmt.Println("ReadString error! Retry again")
+			continue
+		}
+		reg, _ := regexp.Compile("^[1-9][0-9]*") // Remove special character only take digits
+		num := reg.FindString(input)
+
+		if err != nil {
+			fmt.Println(err)
+			fmt.Println("ReadString error! Please enter digits")
+			continue
+		}
+
+		fmt.Println(string(num))
+
+		num_devices, err := strconv.ParseInt(string(num), 0, 64)
+
+		if err != nil {
+			fmt.Println(err)
+			fmt.Println("Convert Number failed! Please re-enter")
+			continue
+		}
+		num_did = num_devices
+		break
+		//return num_devices
+	}
+
+	return num_did
 }
