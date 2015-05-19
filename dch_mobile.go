@@ -34,8 +34,11 @@ func SendRoutine() {
 		os.Exit(0)
 	}
 
+	conn, err := net.DialTCP("tcp", nil, tcpaddr)
+	defer closeConn(conn)
+
 	for i := 0; i < 3; i++ {
-		conn, err := net.DialTCP("tcp", nil, tcpaddr)
+
 		//defer conn.Close() // close when leave the loop
 		if checkError(err, "App DialTCP") {
 			continue
@@ -66,6 +69,11 @@ func main() {
 	for {
 		time.Sleep(time.Second)
 	}
+}
+
+func closeConn(c *net.TCPConn) {
+	fmt.Println("connection close")
+	c.Close()
 }
 
 func checkError(err error, act string) bool {
