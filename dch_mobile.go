@@ -20,7 +20,7 @@ type Device struct {
 
 var (
 	urlip       = "52.68.172.23:80"
-	did         = "12345678901234567890123456789012"
+	did         = "12345678901234567890000000000001"
 	get_request = "GET /ws/api/getVersion?did=" + did + " HTTP/1.1\r\n"
 	host        = "Host: 0401.dch.dlink.com\r\n"
 	alive       = "Connection: keep-alive\r\n\r\n"
@@ -37,28 +37,23 @@ func SendRoutine() {
 	conn, err := net.DialTCP("tcp", nil, tcpaddr)
 	defer closeConn(conn)
 
-	for i := 0; i < 3; i++ {
-
-		//defer conn.Close() // close when leave the loop
-		if checkError(err, "App DialTCP") {
-			continue
-		}
-
-		fmt.Println("App TCP Connect ... ")
-
-		SendMessage(conn, get_msg)
-
-		fmt.Println("Agent Write = %s", get_request)
-
-		echo := GetMessage(conn)
-		if echo == "" {
-			fmt.Println("echo empty")
-			break
-		}
-
-		time.Sleep(time.Second * 2)
-
+	//defer conn.Close() // close when leave the loop
+	if checkError(err, "App DialTCP") {
+		fmt.Println("DialTCP Error")
 	}
+
+	fmt.Println("App TCP Connect ... ")
+
+	SendMessage(conn, get_msg)
+
+	fmt.Println("Agent Write = %s", get_request)
+
+	echo := GetMessage(conn)
+	if echo == "" {
+		fmt.Println("echo empty")
+	}
+	fmt.Println("recieve:", echo)
+	//time.Sleep(time.Second * 2)
 
 	fmt.Println("SendRoutine Exist")
 }

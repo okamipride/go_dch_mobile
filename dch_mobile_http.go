@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	//"crypto/tls"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -9,7 +10,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
-	"time"
+	//"time"
 )
 
 const (
@@ -26,8 +27,8 @@ type Device struct {
 
 var (
 	//urlip       = "52.68.172.23:80"
-	url     = "r0401.dch.dlink.com"
-	did     = "12345678901234567890000000000001"
+	url = "r0401.dch.dlink.com"
+	//did     = "12345678901234567890000000000001"
 	domain  = "http://r0401.dch.dlink.com"
 	api_url = "/ws/api/getVersion?did="
 	alive   = "Connection: keep-alive"
@@ -39,35 +40,88 @@ func closeHttp(resp *http.Response) {
 	defer resp.Body.Close()
 }
 
-func (dev *Device) SendRoutine() {
+//func (dev *Device) SendRoutine(httpclient *http.Client, errc chan error) {
+func (dev *Device) SendRoutine(errc chan error) {
+	//resp, err := client.Get(domain + api_url + dev.usr_did)
+	//resp, err := httpclient.Get(domain + api_url + dev.usr_did)
 	resp, err := http.Get(domain + api_url + dev.usr_did)
+	defer closeHttp(resp)
 
 	if err != nil {
-		log.Println(err)
-		os.Exit(1)
+		//log.Println("get error :", err)
+		errc <- err
+		close(errc)
+		return
 	}
 
-	defer closeHttp(resp)
 	readbytes, err := ioutil.ReadAll(resp.Body)
 
 	if err != nil {
-		log.Println("Error while receive response:", err.Error())
+		errc <- err
+		close(errc)
+		return
+	}
+
+	if resp.StatusCode != 200 {
+		log.Println("Response not ok")
+		errc <- err
+		close(errc)
+		return
 	}
 
 	log.Println("recieve buffer", string(readbytes))
+	errc <- nil
+	close(errc)
+
 }
 
 func main() {
+	var total_request int64 = 0
+	var total_response_ok int64 = 0
+
 	num_dev := readNumDevice()
+	total_request = num_dev
+
+	// for keepalive settings
+	//tr := &http.Transport{
+	//	DisableKeepAlives: false,
+	//TLSClientConfig:    &tls.Config{RootCAs: nil},
+	//DisableCompression: true,
+	//}
+
+	errc := make(chan error)
+
 	for i := int64(1); i <= num_dev; i++ {
+		//client := &http.Client{Transport: tr}
 		device := Device{usr_did: genDid(i), usr_hash: genDid(i)}
-		go device.SendRoutine()
+		//go device.SendRoutine(client, errc)
+		go device.SendRoutine(errc)
 	}
 
-	for {
-		time.Sleep(time.Second)
+	for v := range errc {
+		if v == nil {
+			total_response_ok = total_response_ok + 1
+			log.Println("get ok", strconv.FormatInt(total_response_ok, 10))
+		} else {
+			log.Println("error occur:", errc)
+		}
 	}
 
+	percentage := (total_response_ok / total_request) * 100
+
+	okstr := strconv.FormatInt(total_response_ok, 10)
+	requeststr := strconv.FormatInt(total_request, 10)
+	pertstr := strconv.FormatInt(percentage, 10)
+	log.Println("total_response_ok = ", okstr, "total_request = ", requeststr)
+	log.Println("ok/request = ", pertstr, "%")
+
+	//close(errc)
+
+	/*
+		for {
+			time.Sleep(time.Second)
+		}
+	*/
 	log.Println("Exit Program")
 }
 
