@@ -58,10 +58,18 @@ func (dev *Device) SendRoutine() {
 }
 
 func main() {
-	num_dev := readNumDevice()
+	log.Println("Agent Start to connect ... ")
+	num_dev, num_concurrence, my_delay := readNumDevice()
+
+	//go AutoGC()
+
 	for i := int64(1); i <= num_dev; i++ {
+		//log.Println("delay time")
 		device := Device{usr_did: genDid(i), usr_hash: genDid(i)}
 		go device.SendRoutine()
+		if num_dev%num_concurrence == 0 {
+			time.Sleep(my_delay)
+		}
 	}
 
 	for {
@@ -90,29 +98,29 @@ func checkError(err error, act string) bool {
 	return false
 }
 
-func readNumDevice() int64 {
+func readNumDevice() (int64, int64, time.Duration) {
 	var num_did int64 = 0
+	var num_concur int64 = 0
+	var delay time.Duration = 100 * time.Millisecond
 
 	for {
+		// Number of devices connect to relayd
 		consolereader := bufio.NewReader(os.Stdin)
-		fmt.Print("Enter Number of Devices: ")
-		input, err := consolereader.ReadString('\n') // this will prompt the user for input
-
+		log.Print("Enter Number of Devices: ")
+		input, err := consolereader.ReadString('\n')
 		if err != nil {
-			fmt.Println(err)
-			fmt.Println("ReadString error! Retry again")
+			log.Println("ReadString error! Retry again = ", err)
 			continue
 		}
 		reg, _ := regexp.Compile("^[1-9][0-9]*") // Remove special character only take digits
 		num := reg.FindString(input)
 
 		if err != nil {
-			fmt.Println(err)
-			fmt.Println("ReadString error! Please enter digits")
+			log.Println("ReadString error! Please enter digits. error = ", err)
 			continue
 		}
 
-		fmt.Println(string(num))
+		log.Println(string(num))
 
 		num_devices, err := strconv.ParseInt(string(num), 0, 64)
 
@@ -122,9 +130,43 @@ func readNumDevice() int64 {
 			continue
 		}
 		num_did = num_devices
-		break
-		//return num_devices
-	}
 
-	return num_did
+		// Number of devices connect to relayd continousely without delay
+		log.Print("Enter Number of Concurrent Connect: ")
+		input, err = consolereader.ReadString('\n')
+
+		if err != nil {
+			log.Println("ReadString error! Use number of devices. error = ", err)
+			num_concur = num_did
+		}
+
+		concur := reg.FindString(input)
+		num_concur, err = strconv.ParseInt(string(concur), 0, 64)
+		if err != nil {
+			log.Println("ReadString error! Use number of devices. error = ", err)
+			num_concur = num_did
+		}
+
+		// Number of devices connect to relayd continousely without delay
+		log.Print("Enter delay ms: ")
+		input, err = consolereader.ReadString('\n')
+
+		if err != nil {
+			log.Println("ReadString error! Use 100ms. error = ", err)
+			delay = 100 * time.Millisecond
+		}
+
+		delayStr := reg.FindString(input)
+		ms, err := strconv.ParseInt(string(delayStr), 0, 64)
+
+		if err != nil {
+			log.Println("ReadString error! Use 100ms,  error = ", err)
+			delay = 100 * time.Millisecond
+		}
+
+		delay = time.Duration(ms) * time.Millisecond
+
+		break
+	}
+	return num_did, num_concur, delay
 }
