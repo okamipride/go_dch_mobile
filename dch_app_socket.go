@@ -5,21 +5,28 @@ import (
 	"flag"
 	"fmt"
 	//"io/ioutil"
+	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
-	"strings"
+	//"strings"
+	//"encoding/hex"
 	"time"
 )
 
+var did_base int64 = 0
+var state_log = false
+var msg_delay_msg = 1000
+
 const (
-	RECV_HEADER_CAP        = 1024 * 2
+	RECV_HEADER_CAP        = 1024 * 10
 	RECV_BUF_CAP           = 1024 * 10
 	RECV_BODY_CAP          = RECV_BUF_CAP
-	RFE_REQUEST_TIMEOUT    = 5000
-	RELAY_RESPONSE_TIMEOUT = 15000
+	RFE_REQUEST_TIMEOUT    = 5 * 1000
+	RELAY_RESPONSE_TIMEOUT = 15 * 1000
 )
 
 var did_prefix = "1234567890" + "1234567890"
@@ -30,7 +37,7 @@ type Device struct {
 }
 
 var (
-	did            = "12345678901234567890000000000001"
+	did            = "6b326abfca91fe5c9c7fa28612910a6c"
 	get_ver_prefix = "GET /ws/api/getVersion?did="
 	http_1_1       = " HTTP/1.1\r\n"
 	host           = "Host: 0301.dch.dlink.com\r\n"
@@ -43,7 +50,8 @@ func closeHttp(resp *http.Response) {
 }
 
 func (dev *Device) SendRoutine(url string, loginfo bool) {
-	get_ver_msg := get_ver_prefix + dev.usr_hash + http_1_1 + host + alive
+	get_ver_msg := get_ver_prefix + dev.usr_did + http_1_1 + host + alive
+	//get_ver_msg := get_ver_prefix + did + http_1_1 + host + alive
 	tcpaddr, err := net.ResolveTCPAddr("tcp", url)
 	if err != nil {
 		log.Println("error", err, " url=", url)
@@ -52,25 +60,30 @@ func (dev *Device) SendRoutine(url string, loginfo bool) {
 
 	conn, err := net.DialTCP("tcp", nil, tcpaddr)
 	defer closeConn(conn)
-
 	if err != nil {
 		log.Println("connect error", err, "url = ", url)
 		return // retry escape
 	}
-
+	conn.SetKeepAlive(true)
 	if loginfo {
 		fmt.Printf(" %s %s ", dev.usr_did[27:32], "Connected")
 	}
-	conn.Write([]byte(get_ver_msg))
 
-	/*
-		rep, er_2 := GetReqRepEx(conn, RELAY_RESPONSE_TIMEOUT, RELAY_RESPONSE_TIMEOUT, nil)
-		if er_2 != nil {
-			log.Println("response error", er_2)
+	for {
+		conn.Write([]byte(get_ver_msg))
+
+		//head_str, body_str, exit_state := dev.GetRespByReg(conn, RELAY_RESPONSE_TIMEOUT, RELAY_RESPONSE_TIMEOUT)
+		_, _, exit_state := dev.GetRespByReg(conn, RELAY_RESPONSE_TIMEOUT, RELAY_RESPONSE_TIMEOUT)
+		//fmt.Println("response hearder =", head_str)
+		//fmt.Println("response hearder =", body_str)
+		if exit_state == READ_ERR {
+			fmt.Println("READ ERROR")
+		} else {
+			fmt.Println("READ OK")
 		}
+		time.Sleep(time.Duration(msg_delay_msg) * time.Millisecond)
+	}
 
-		fmt.Println("response=", rep)
-	*/
 }
 
 func main() {
@@ -80,11 +93,10 @@ func main() {
 	rf_url = rf_url + ":80"
 	debuglog := true
 	//go AutoGC()
-
 	for i := int64(1); i <= num_dev; i++ {
-		//log.Println("delay time")
 		device := Device{usr_did: genDid(i), usr_hash: genDid(i)}
 		go device.SendRoutine(rf_url, debuglog)
+
 		if i%num_concurrence == 0 {
 			time.Sleep(my_delay)
 		}
@@ -148,102 +160,383 @@ func SetTImeout(c *net.TCPConn, timeout int) {
 	}
 }
 
-func (dev *Device) GetResponsec(c *net.TCPConn, wait_timeout, read_timeout int, tsheader string) string {
+const (
+	HEADER_READING = iota
+	CHUNK_READING
+	TEXT_READING
+	READ_END
+	READ_ERR
+)
+
+const (
+	CHUNKED_READ_STOP = iota
+	CHUNKED_READ_COUNT
+	CHUNKED_READ_COUNT_R
+	CHUNKED_READ_COUNT_END
+	CHUNKED_READ_TEXT
+	CHUNKED_READ_TEXT_R
+	CHUNKED_READ_TEXT_END
+	CHUNKED_READ_END
+)
+
+func (dev *Device) GetRespByReg(c *net.TCPConn, wait_timeout int, read_timeout int) (string, string, int) {
 	header := make([]byte, 0, RECV_HEADER_CAP)
-	headbuf := make([]byte, 1, RECV_BUF_CAP)
-	//body := make([]byte, 0, RECV_BODY_CAP)
+	readbuf := make([]byte, 1, RECV_BUF_CAP)
+	body := make([]byte, 0, RECV_BODY_CAP)
+	state := HEADER_READING            // Reading state
+	chunked_state := CHUNKED_READ_STOP // State used in Reading Chunked data
+	var content_length int64           // use in Content-Length reading (Text format)
+	digitTemp := make([]byte, 0, 1024) // use to store chunked length
+	var nextLength int64 = 0           // use to store  chunked length
 
-	for {
-		n, err := c.Read(headbuf)
-		SetTImeout(c, read_timeout)
-		if err != nil { // Read Error
-			if err == io.EOF {
-				fmt.Println("EOF rechea")
+	for state != READ_END && state != READ_ERR {
+
+		switch state {
+		case HEADER_READING:
+			n, err := c.Read(readbuf)
+			SetTImeout(c, read_timeout)
+			if err != nil { // Read Error
+				if err == io.EOF {
+					fmt.Println("EOF reach")
+					state = READ_ERR
+					break
+				}
+				fmt.Println("Read Error ", err)
+				state = READ_ERR
+				break
 			}
-			break
-		}
 
-		header = append(header, headbuf[:n]...)
-		if strings.Index(string(header), "\r\n\r\n") > 0 {
-			break
-		}
+			header = append(header, readbuf[:n]...)
+			find := findheader(string(header))
+
+			if find != "" { //find header end , determine is text or chunched
+				err, content_length = isText(find)
+				if err != nil {
+					chuncked := isChunked(string(header))
+					if chuncked {
+						state = CHUNK_READING
+						chunked_state = CHUNKED_READ_COUNT
+						if state_log {
+							fmt.Println("****CHUNKED_READ_COUNT")
+						}
+						break
+					} else {
+						state = READ_ERR
+						fmt.Println("error = ", err)
+					}
+
+				}
+				if state_log {
+					fmt.Println("cont_len:", content_length)
+				}
+				state = TEXT_READING
+				if state_log {
+					fmt.Println("****TEXT_READING")
+				}
+			}
+			/*
+			   READ Text DATA
+			*/
+		case TEXT_READING:
+			//fmt.Println("TEXT_READING")
+			content := make([]byte, content_length)
+			n, er := io.ReadFull(c, content)
+			body = append(body, content[:content_length]...)
+			if state_log {
+				log.Printf("Content:%d,Data:%d,Err:%s", content_length, n, er)
+				fmt.Println("Data =", string(body))
+			}
+			state = READ_END
+			if state_log {
+				fmt.Println("****READ_END")
+			}
+			/*
+			   READ CHUNKED DATA
+			*/
+		case CHUNK_READING:
+			//fmt.Printf(" CHUNK_READING ")
+			n, err := c.Read(readbuf)
+			SetTImeout(c, read_timeout)
+			if err != nil { // Read Error
+				if err == io.EOF {
+					fmt.Println("EOF reach")
+					state = READ_END
+				}
+				fmt.Println("Read Error ", err)
+				state = READ_ERR
+			}
+
+			body = append(body, readbuf[:n]...)
+
+			switch chunked_state {
+			case CHUNKED_READ_COUNT:
+				//fmt.Println("CHUNKED_READ_COUNT", readbuf, string(readbuf))
+				isR := isCartByte(readbuf)
+				if isR {
+					chunked_state = CHUNKED_READ_COUNT_R
+					if state_log {
+						fmt.Println("==== Next  State = CHUNKED_READ_COUNT_R")
+					}
+					break
+				}
+				isDigit, _ := isDigitBytes(readbuf)
+				if !isDigit {
+					state = READ_ERR
+					break
+				}
+				digitTemp = append(digitTemp, readbuf[:n]...) // save read-digit for length
+				if state_log {
+					fmt.Println("CHUNKED_READ_COUNT digitTemp", string(digitTemp), "length=", len(string(digitTemp)))
+				}
+			case CHUNKED_READ_COUNT_R:
+				isN := isNewlineByte(readbuf)
+				if !isN {
+					state = READ_ERR
+					break
+				}
+				chunked_state = CHUNKED_READ_COUNT_END
+				if state_log {
+					fmt.Println("==== Next  State = CHUNKED_READ_COUNT_END")
+				}
+			case CHUNKED_READ_COUNT_END:
+				err, nextLength = lineHexGetInt(string(digitTemp))
+				if state_log {
+					fmt.Println("CHUNKED_READ_COUNT_END nextLength=", nextLength, "buf=", readbuf, string(readbuf), "string length", string(digitTemp))
+				}
+				if err != nil {
+					fmt.Println("CHUNKED_READ_COUNT_END error", err)
+					state = READ_ERR
+					break
+				}
+				// No error and read length = 0
+				if nextLength == 0 { // End of Read Chunk
+					if isCartByte(readbuf) {
+						chunked_state = CHUNKED_READ_END // Prepare to READ END
+						if state_log {
+							fmt.Println("==== Next  State = CHUNKED_READ_END_R")
+						}
+					}
+					break
+				}
+				digitTemp = digitTemp[:0] // reset temp
+				chunked_state = CHUNKED_READ_TEXT
+				if state_log {
+					fmt.Println("==== Next  State = CHUNKED_READ_TEXT")
+				}
+
+			case CHUNKED_READ_TEXT:
+				nextLength = nextLength - 1
+				if nextLength <= 0 {
+					if isCartByte(readbuf) {
+						chunked_state = CHUNKED_READ_TEXT_R
+						if state_log {
+							fmt.Println("==== Next  State = CHUNKED_READ_TEXT_R")
+						}
+					} else {
+						state = READ_ERR
+						if state_log {
+							fmt.Println("==== Next  State = READ_ERR")
+						}
+					}
+				}
+
+			case CHUNKED_READ_TEXT_R:
+				//fmt.Println("CHUNKED_READ_COUNT_R readbuf", readbuf)
+				isNewline := isNewlineByte(readbuf)
+				if !isNewline {
+					state = READ_ERR
+					fmt.Println("==== Next  State = READ_ERR")
+					break
+				}
+				// Becasue we had already read a count byte from buffer
+				chunked_state = CHUNKED_READ_TEXT_END
+				if state_log {
+					fmt.Println("==== Next  State = CHUNKED_READ_TEXT_END")
+				}
+			case CHUNKED_READ_TEXT_END:
+				digitTemp = append(digitTemp, readbuf[:n]...)
+				chunked_state = CHUNKED_READ_COUNT
+				if state_log {
+					fmt.Println("==== Next  State = CHUNKED_READ_COUNT")
+				}
+
+			case CHUNKED_READ_END:
+				if isNewlineByte(readbuf) { // new line , the end the chunck
+					chunked_state = CHUNKED_READ_STOP
+					state = READ_END
+					if state_log {
+						fmt.Println("**** Next  State = READ_END")
+					}
+					break
+				} else {
+					chunked_state = CHUNKED_READ_STOP
+					state = READ_ERR
+					fmt.Println("error : no /n in the chunck end")
+					break
+				}
+
+			case CHUNKED_READ_STOP:
+				if state_log {
+					fmt.Println("CHUNKED_READ_STOP")
+				}
+				state = READ_END
+				if state_log {
+					fmt.Println("==== Next  State = READ_END")
+				}
+				break
+			}
+			//n, err := c.Read(body)
+		} // switch 1 end
+
+	} // for end
+	if state_log {
+		fmt.Println("Exist READING state =", state)
 	}
-
-	return string(header)
+	return string(header), string(body), state
 }
 
-func GetReqRepEx(c *net.TCPConn, wait_timeout, read_timeout int, tsheader string) (reqrep string, er error) {
-	var chunked bool
-	var contentlength int
-	var newheader string
-	header := make([]byte, 0)
-	headbuf := make([]byte, 1)
-	body := make([]byte, 0)
+func findheader(str string) string {
+	reg, _ := regexp.Compile("((?s).*?)\\r\\n\\r\\n")
+	find := reg.FindString(str)
+	//fmt.Println("findLen = ", len(find))
+	return find
+}
 
-	defer func() {
-		SetTImeout(c, wait_timeout)
-		if er == nil {
-			reqrep = newheader + string(body)
-		} else {
-			reqrep = ""
-		}
-		return
-	}()
+func isText(str string) (error, int64) {
+	reg, err := regexp.Compile("[C|c][O|o][N|n][T|t][E|e][N|n][T|t]-[L|l][E|e][N|n][G|g][T|t][H|h]:.*?\\r\\n") // Content-Length
+	if err != nil {
+		return err, 0
+	}
+	find := reg.FindString(str)
 
-	//===================================  設定SOCKET連上後等待第一個\n的時間  ==============================
-	SetTImeout(c, wait_timeout)
-	//===================================  此部分讀完 HEADER ============================================
+	if find != "" {
+		err, num := lineGetInt(find)
+		if err != nil {
+			return err, 0
+		}
+		//fmt.Println("isText = ", num)
+		return nil, num
+	}
+	return errors.New("not found"), 0
+}
 
-	for er == nil {
-		n, err := c.Read(headbuf)
-		SetTImeout(c, read_timeout)
-		er = err
-		header = append(header, headbuf[:n]...)
-		if strings.Index(string(header), "\r\n\r\n") > 0 {
-			break
-		}
+func isChunked(header string) bool {
+	reg, err := regexp.Compile("[C|c][H|h][U|u][N|n][K|k][E|e][D|d]") //Chuncked
+	if err != nil {
+		return false
 	}
-	if er != nil {
-		return
-	}
-	//===================================  塞入TimeStamp到Header尾端 ====================================
-	newheader = string(header[0:len(header)-2]) + fmt.Sprintf("%s: %0.5f\r\n\r\n", tsheader, (float64(time.Now().UnixNano())/1000000000))
+	find := reg.FindString(header)
 
-	//===================================  此部份決定Body該如何收  ======================================
-	have_content_length := strings.Index(newheader, "Content-Length:")
-	have_chunked := strings.Index(newheader, "chunked")
-	if have_content_length > 0 {
-		h := []byte(header)[have_content_length+16:]
-		stopindex := strings.Index(string(h), "\r\n")
-		contentlength, er = strconv.Atoi(string([]byte(h)[0:stopindex]))
-		if er != nil {
-			return
-		}
-		chunked = false
-		log.Println("[Header]Content-Length: ", contentlength)
-	} else if have_chunked > 0 {
-		chunked = true
-		log.Println("[Header]Transfer-Encoding: chunked")
+	if find == "" {
+		return false
 	}
-	//===================================  此部分開始讀 BODY ============================================
-	var n int
-	if chunked {
-		tmp := make([]byte, 1024*32)
-		c.SetReadDeadline(time.Now().Add(time.Millisecond * time.Duration(50)))
-		n, er = c.Read(tmp)
-		body = append(body, tmp[:n]...)
-		if er != nil {
-			return
-		}
-	} else if contentlength > 0 {
-		content := make([]byte, contentlength)
-		n, er = io.ReadFull(c, content)
-		body = append(body, content[:contentlength]...)
-		log.Printf("Content:%d,Data:%d,Err:%s", contentlength, n, er)
-		if er != nil {
-			return
-		}
+
+	return true
+}
+
+func isEndLine(str string) bool {
+	reg, _ := regexp.Compile("((?s).*?)\\r\\n") // any thing has and end
+	find := reg.FindString(str)
+	if find != "" {
+		return true
 	}
-	//===================================  此部分回傳Response ==========================================
-	return
+	return false
+}
+
+func isCartByte(rbyte []byte) bool {
+	reg, _ := regexp.Compile("\\r")
+	find := reg.FindString(string(rbyte))
+	if find != "" {
+		//fmt.Println("isCartByte", rbyte)
+		return true
+	}
+	return false
+}
+
+func isNewlineByte(nbyte []byte) bool {
+	reg, _ := regexp.Compile("\\n")
+	find := reg.FindString(string(nbyte))
+	if find != "" {
+		//fmt.Println("isNewlineByte", nbyte)
+		return true
+	}
+	return false
+}
+
+func isDigitBytes(dgbyte []byte) (bool, string) {
+	num_reg, _ := regexp.Compile("[0-9]+")
+	find := num_reg.FindString(string(dgbyte))
+	if find == "" { // not found
+		return false, ""
+	}
+	return true, find
+}
+
+func lineGetInt(str string) (error, int64) {
+	if str != "" {
+		num_reg, err := regexp.Compile("[0-9]+")
+		if err != nil {
+			return err, 0
+		}
+		findnum := num_reg.FindString(str)
+		if findnum == "" {
+			return errors.New("digit not found"), 0
+		}
+		//num, err := strconv.Atoi(findnum)
+		num, err := strconv.ParseInt(findnum, 0, 64)
+		if err != nil {
+			return err, 0
+		}
+		return nil, num
+	}
+	return errors.New("digit not found"), 0
+}
+
+func lineHexGetInt(str string) (error, int64) {
+	//fmt.Println("lineHexGetInt str=", str)
+	if str != "" {
+		num_reg, err := regexp.Compile("[0-9a-fA-F]+")
+		if err != nil {
+			fmt.Println("lineHexGetInt reg error")
+			return err, 0
+		}
+		findnum := num_reg.FindString(str)
+		if findnum == "" {
+			return errors.New("Hex String not found"), 0
+		}
+		//fmt.Println("lineHexGetInt find=", findnum)
+		return nil, Conv16To10base(findnum)
+	}
+	return errors.New("digit not found"), 0
+}
+
+func Conv16To10base(num string) int64 {
+	length := len(num)
+	var single string
+	var base int64 = 1
+	var sum int64 = 0
+	for i := int64(length); i > 0; i-- {
+		single = num[i-1 : i]
+		//fmt.Println(" char = ", single)
+		switch single {
+		case "a", "A":
+			sum = sum + 10*base
+		case "b", "B":
+			sum = sum + 11*base
+		case "c", "C":
+			sum = sum + 12*base
+		case "d", "D":
+			sum = sum + 13*base
+		case "e", "E":
+			sum = sum + 14*base
+		case "f", "F":
+			sum = sum + 15*base
+		default:
+			digit, _ := strconv.ParseInt(single, 0, 64)
+			sum = sum + digit*base
+		}
+		//fmt.Println("Conv16To10base sum ", sum)
+		base = base * 16
+	}
+	return sum
 }
